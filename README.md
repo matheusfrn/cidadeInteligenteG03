@@ -1,5 +1,7 @@
 # cidadeInteligenteG03
 
+Link para a dashboard do projeto: https://inteli-ubidots.iot-application.com/app/dashboards/67290275b869fe8e5d59d14e
+
 ## Funcionalidades
 
 1. **Detecção de Veículos:** O sensor de luminosidade detecta quando um veículo passa, alterando o estado dos semáforos para facilitar o fluxo.  
