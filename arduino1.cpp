@@ -1,204 +1,249 @@
 #include <WiFi.h>
-#include "UbidotsEsp32Mqtt.h"
+#include <PubSubClient.h>
 
-// Credenciais e configurações do Ubidots e WiFi
-const char *UBIDOTS_TOKEN = "BBUS-fB2eR6n1JEeD8vkdU8i3NcKurxyRYl"; // Token para autenticação no Ubidots
-const char *WIFI_SSID = ""; // Nome da rede WiFi
-const char *WIFI_PASS = ""; // Senha da rede WiFi
+// Configurações do WiFi
+const char* SSID = "Inteli.Iot";
+const char* SENHA = "@Intelix10T#";
 
-// Rótulos para identificação no Ubidots
-const char *DEVICE_LABEL = "esp32_t11_g"; // Identificador do dispositivo no Ubidots
-const char *VARIABLE_LABEL_PEDESTRE = "pedestrianButton"; // Variável para indicar o botão de pedestre
-const char *VARIABLE_LABEL_MUDANCA = "changeButton"; // Variável para indicar o botão de mudança
-const char *VARIABLE_LABEL_PEDESTRE_ATIVO = "pedestrianActive2"; // Variável para o estado do pedestre ativo
-const char *VARIABLE_LABEL_CICLO_SECUNDARIO = "cicloSecundario"; // Variável para o estado do ciclo secundário
+// Configurações do MQTT
+const char* ID_CLIENTE = "ESP32_Semaforo_001";
+const char* SERVIDOR_MQTT = "broker.emqx.io";
+const int PORTA_MQTT = 1883;
 
-// Pinos do primeiro semáforo
-const uint8_t LED_VERMELHO_1 = 33;
-const uint8_t LED_AMARELO_1 = 15;
-const uint8_t LED_VERDE_1 = 32;
+// Definição dos tópicos MQTT
+const char* TOPICO_MODO_PEDESTRE = "esp32/traffic/pedestrian_mode";
+const char* TOPICO_CICLO_SECUNDARIO = "esp32/traffic/secondary_cycle";
+const char* TOPICO_MODO_NOTURNO = "esp32/traffic/night_mode";
+const char* TOPICO_BOTAO_PEDESTRE = "esp32/traffic/pedestrian_button";
 
-// Pinos do segundo semáforo
-const uint8_t LED_VERMELHO_2 = 14;
-const uint8_t LED_AMARELO_2 = 27;
-const uint8_t LED_VERDE_2 = 26;
+// Pinos usados no ESP32
+#define PINO_LED_VERMELHO 27
+#define PINO_LED_AMARELO 14
+#define PINO_LED_VERDE 12
+#define PINO_BOTAO_PEDESTRE 19
+#define PINO_LDR_NOITE 32
 
-// Pino do botão de pedestre
-const uint8_t BOTAO_PEDESTRE = 18;
-
-// Estados possíveis do semáforo
-enum Estados {
-    ESTADO_VERDE,    // Estado em que o semáforo está verde
-    ESTADO_VERMELHO, // Estado em que o semáforo está vermelho
-    ESTADO_AMARELO,  // Estado em que o semáforo está amarelo
-    ESTADO_PEDESTRE  // Estado em que o semáforo está vermelho para permitir passagem de pedestres
+// Estados do semáforo
+enum EstadosSemaforo {
+    ESTADO_VERMELHO,
+    ESTADO_AMARELO,
+    ESTADO_VERDE,
+    ESTADO_MODO_NOTURNO
 };
 
-// Variáveis gerais de controle
-int estado_botao_pedestre; // Armazena o estado do botão de pedestre
-long tempo_decorrido;      // Controla o tempo decorrido
-long tempo_anterior = 0;   // Marca o tempo da última atualização
-long tempo_verde_inicial;  // Marca o início do estado verde
-long intervalo = 0;        // Tempo para permanecer em cada estado
-Estados estado_atual = ESTADO_VERDE; // Estado atual do semáforo
+// Configuração do wifi e do MQTT
+WiFiClient cliente_wifi;
+PubSubClient cliente_mqtt(cliente_wifi);
 
-// Flags para controlar ciclos e estados
-bool mudanca = false;                // Indica se houve solicitação de mudança
-bool pedestreAtivo1 = false;         // Indica se o botão de pedestre foi pressionado
-bool cicloPedestre = false;          // Indica se está em ciclo de pedestres
-bool cicloSecundario = false;        // Indica se está em ciclo secundário
-bool cicloMudanca = false;           // Indica se houve uma mudança recente
-bool novoCiclo = true;               // Marca o início de um novo ciclo
-bool pedestre_secundario_ativo;      // Indica se o pedestre está ativo no estado secundário
-long TEMPO_MINIMO_VERDE = 3000;      // Tempo mínimo para manter o semáforo no estado verde
-
-// Configuração da instância do Ubidots
-Ubidots ubidots(UBIDOTS_TOKEN);
-
-// Função de callback para processar mensagens MQTT recebidas
-void callback(char *topic, byte *payload, unsigned int length) {
-    String message;
-    for (int i = 0; i < length; i++) {
-        message += (char)payload[i];
-    }
-
-    // Atualiza o estado do pedestre ativo com base no tópico recebido
-    if (String(topic) == VARIABLE_LABEL_PEDESTRE_ATIVO) {
-        pedestre_secundario_ativo = (message == "1");
-    }
-
-    // Atualiza o estado de mudança com base no tópico recebido
-    if (String(topic) == VARIABLE_LABEL_MUDANCA) {
-        mudanca = (message == "1");
-    }
-}
+EstadosSemaforo estado_atual = ESTADO_VERMELHO; // Estado inicial
+long tempo_decorrido;
+long intervalo;
+long tempo_anterior = 0;
+bool modo_noturno_ativo = false; // Indica se o modo noturno está ativo
+bool botao_pressionado = false; // Estado atual do botão
+const int LIMITE_MODO_NOTURNO = 500; // Limite de luminosidade para ativar o modo noturno
 
 void setup() {
-    Serial.begin(115200);
 
-    // Configuração do WiFi e conexão com o Ubidots
-    ubidots.connectToWifi(WIFI_SSID, WIFI_PASS);
-    ubidots.setCallback(callback);
-    ubidots.setup();
-    ubidots.reconnect();
-    ubidots.subscribeLastValue(DEVICE_LABEL, VARIABLE_LABEL_PEDESTRE_ATIVO);
-    ubidots.subscribeLastValue(DEVICE_LABEL, VARIABLE_LABEL_MUDANCA);
+  // Inicialização do monitor serial
+  Serial.begin(115200);
+  Serial.println("Iniciando o sistema de semáforo");
 
-    // Configuração dos pinos dos LEDs dos semáforos
-    pinMode(LED_VERMELHO_1, OUTPUT);
-    pinMode(LED_AMARELO_1, OUTPUT);
-    pinMode(LED_VERDE_1, OUTPUT);
-    pinMode(LED_VERMELHO_2, OUTPUT);
-    pinMode(LED_AMARELO_2, OUTPUT);
-    pinMode(LED_VERDE_2, OUTPUT);
+  // Conecta ao WiFi
+  conectarWiFi();
 
-    // Configuração do pino do botão de pedestres
-    pinMode(BOTAO_PEDESTRE, INPUT);
+  // Conecta ao broker MQTT
+  conectarMQTT(); 
+
+  // Configura os pinos e LEDs
+  inicializarComponentes(); 
 }
 
 void loop() {
-    // Reconecta ao Ubidots caso desconectado
-    if (!ubidots.connected()) {
-        ubidots.reconnect();
+
+  // Se o MQTT não estiver conectado, chama a função para reconectar
+  if (!cliente_mqtt.connected()) {
+    conectarMQTT();
+  }
+
+  // Mantém a conexão MQTT ativa
+  cliente_mqtt.loop(); 
+
+  // Monitora o estado do botão e do LDR
+  verificarBotao(); 
+  verificarLDR();
+  
+  // Conta o tempo decorrido
+  tempo_decorrido = millis();
+
+  // Atualiza os estados do semáforo ao passar o tempo do intervalo
+  if (tempo_decorrido - tempo_anterior >= intervalo) {
+
+    // Atualiza o tempo anterior
+    tempo_anterior = tempo_decorrido;
+
+    // Desliga todos os LEDs antes de mudar de estado
+    resetarLeds(); 
+
+    if (modo_noturno_ativo) {
+      modoNoturno(); // Executa o comportamento do modo noturno
+    } else {
+      alternarSemaforo(); // Alterna entre os outros estados do semáforo
     }
-
-    // Lê o estado do botão de pedestres
-    estado_botao_pedestre = !digitalRead(BOTAO_PEDESTRE);
-
-    // Ativa o ciclo de pedestres se o botão for pressionado
-    if (estado_botao_pedestre) {
-        pedestreAtivo1 = true;
-    }
-
-    // Verifica e gerencia transições de estado
-    if (cicloMudanca && pedestre_secundario_ativo) {
-        intervalo = 4000;
-        estado_atual = ESTADO_AMARELO;
-        cicloPedestre = true;
-        cicloMudanca = false;
-    }
-
-    if (estado_atual == ESTADO_VERDE && (millis() - tempo_verde_inicial) >= TEMPO_MINIMO_VERDE) {
-        if (pedestreAtivo1 || mudanca) {
-            intervalo = 0;
-            estado_atual = ESTADO_AMARELO;
-            cicloPedestre = pedestreAtivo1;
-            cicloSecundario = mudanca;
-        }
-    }
-
-    // Controle dos tempos e troca de estados
-    tempo_decorrido = millis();
-    if (tempo_decorrido - tempo_anterior >= intervalo) {
-        resetarLEDs();
-
-        // Gerencia os estados dos semáforos
-        switch (estado_atual) {
-            case ESTADO_VERDE: estadoVerde(); break;
-            case ESTADO_VERMELHO: estadoVermelhoSecundario(); break;
-            case ESTADO_AMARELO: estadoAmarelo(); break;
-            case ESTADO_PEDESTRE: estadoPedestre(); break;
-        }
-
-        tempo_anterior = tempo_decorrido;
-    }
-
-    // Publica os estados dos ciclos no Ubidots
-    ubidots.add(VARIABLE_LABEL_PEDESTRE, cicloPedestre ? 1 : 0);
-    ubidots.add(VARIABLE_LABEL_CICLO_SECUNDARIO, cicloSecundario ? 1 : 0);
-    ubidots.publish(DEVICE_LABEL);
-
-    // Mantém o loop MQTT ativo
-    ubidots.loop();
+  }
 }
 
-// Função para apagar todos os LEDs
-void resetarLEDs() {
-    digitalWrite(LED_VERMELHO_1, LOW);
-    digitalWrite(LED_AMARELO_1, LOW);
-    digitalWrite(LED_VERDE_1, LOW);
-    digitalWrite(LED_VERMELHO_2, LOW);
-    digitalWrite(LED_AMARELO_2, LOW);
-    digitalWrite(LED_VERDE_2, LOW);
+// Função para conectar ao WiFi
+void conectarWiFi() {
+  Serial.print("Conectando ao WiFi");
+  WiFi.begin(SSID, SENHA);
+
+  while (WiFi.status() != WL_CONNECTED) { // Espera até a conexão ser estabelecida
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado!");
 }
 
-// Função para gerenciar o estado verde
-void estadoVerde() {
-    if (novoCiclo) {
-        tempo_verde_inicial = millis();
-        novoCiclo = false;
+// Callback para processar mensagens MQTT recebidas
+void callbackMQTT(char* topico, byte* payload, unsigned int comprimento) {
+  String mensagem;
+  for (int i = 0; i < comprimento; i++) {
+    mensagem += (char)payload[i];
+  }
+
+  // Imprime a mensagem recebida
+  Serial.print("Mensagem recebida [");
+  Serial.print(topico);
+  Serial.print("]: ");
+  Serial.println(mensagem);
+
+  // Se receber mensagem do topico modo noturno
+  if (String(topico) == TOPICO_MODO_NOTURNO) {
+
+    // alterna o se o modo está ativo ou não
+    modo_noturno_ativo = (mensagem == "1");
+
+    // Se o modo está ativo, muda para o estado de modo noturno
+    if (modo_noturno_ativo) {
+      intervalo = 0;
+      estado_atual = ESTADO_MODO_NOTURNO;
     }
-    digitalWrite(LED_VERDE_1, HIGH);
-    digitalWrite(LED_VERDE_2, HIGH);
-    intervalo = 4000; // Tempo padrão no estado verde
-    cicloPedestre = false;
-    cicloSecundario = false;
-    cicloMudanca = false;
+  }
+
+  // Se receber a mensagem do tópico ciclo secundario igual a 1
+  if (String(topico) == TOPICO_CICLO_SECUNDARIO && mensagem == "1") {
+    estado_atual = ESTADO_VERDE; // Ativa o ciclo secundário
+    intervalo = 0;
+  }
 }
 
-// Função para gerenciar o estado amarelo
+// Função para conectar ao broker MQTT
+void conectarMQTT() {
+  cliente_mqtt.setServer(SERVIDOR_MQTT, PORTA_MQTT);
+  cliente_mqtt.setCallback(callbackMQTT);
+
+  while (!cliente_mqtt.connected()) {
+    Serial.println("\nTentando conectar ao MQTT...");
+    if (cliente_mqtt.connect(ID_CLIENTE)) {
+      Serial.println("Conectado ao MQTT!");
+
+      // Inscreve-se nos tópicos necessários
+      cliente_mqtt.subscribe(TOPICO_MODO_NOTURNO);
+      cliente_mqtt.subscribe(TOPICO_CICLO_SECUNDARIO);
+    } else {
+      Serial.print("Falha na conexão, estado: ");
+      Serial.println(cliente_mqtt.state());
+      delay(2000); // Aguarda antes de tentar novamente
+    }
+  }
+}
+
+// Configura os LEDs e botão
+void inicializarComponentes() {
+  pinMode(PINO_LED_VERMELHO, OUTPUT);
+  pinMode(PINO_LED_AMARELO, OUTPUT);
+  pinMode(PINO_LED_VERDE, OUTPUT);
+  pinMode(PINO_BOTAO_PEDESTRE, INPUT_PULLUP);
+  resetarLeds();
+  digitalWrite(PINO_LED_VERMELHO, HIGH); // Inicia no estado vermelho
+}
+
+// Desliga todos os LEDs
+void resetarLeds() {
+  digitalWrite(PINO_LED_VERMELHO, LOW);
+  digitalWrite(PINO_LED_AMARELO, LOW);
+  digitalWrite(PINO_LED_VERDE, LOW);
+}
+
+// Alterna entre os estados do semáforo
+void alternarSemaforo() {
+  switch (estado_atual) {
+    case ESTADO_VERMELHO:
+      estadoVermelho();
+      break;
+    case ESTADO_AMARELO:
+      estadoAmarelo();
+      break;
+    case ESTADO_VERDE:
+      estadoVerde();
+      break;
+  }
+}
+
+// Liga o LED vermelho e ajusta o intervalo
+void estadoVermelho() {
+  digitalWrite(PINO_LED_VERMELHO, HIGH);
+  intervalo = 1000;
+}
+
+// Liga o LED amarelo e ajusta o intervalo
 void estadoAmarelo() {
-    digitalWrite(LED_AMARELO_1, HIGH);
-    digitalWrite(LED_AMARELO_2, HIGH);
-    intervalo = 2000;
-
-    estado_atual = cicloPedestre ? ESTADO_PEDESTRE : ESTADO_VERMELHO;
+  digitalWrite(PINO_LED_AMARELO, HIGH);
+  intervalo = 2000;
+  estado_atual = ESTADO_VERMELHO; // Próximo estado
 }
 
-// Função para gerenciar o estado vermelho
-void estadoVermelhoSecundario() {
-    novoCiclo = true;
-    cicloMudanca = true;
-    digitalWrite(LED_VERMELHO_1, HIGH);
-    digitalWrite(LED_VERMELHO_2, HIGH);
-    intervalo = 6000;
-    estado_atual = ESTADO_VERDE;
+// Liga o LED verde e ajusta o intervalo
+void estadoVerde() {
+  digitalWrite(PINO_LED_VERDE, HIGH);
+  intervalo = 4000;
+  estado_atual = ESTADO_AMARELO; // Próximo estado
 }
 
-// Função para gerenciar o estado de pedestre
-void estadoPedestre() {
-    novoCiclo = true;
-    digitalWrite(LED_VERMELHO_1, HIGH);
-    digitalWrite(LED_VERMELHO_2, HIGH);
-    intervalo = 3500;
-    estado_atual = cicloSecundario ? ESTADO_VERMELHO : ESTADO_VERDE;
+// Alterna o LED amarelo para o modo noturno
+void modoNoturno() {
+  static bool led_amarelo_ligado = false;
+  if (led_amarelo_ligado) {
+    digitalWrite(PINO_LED_AMARELO, HIGH);
+  }
+  led_amarelo_ligado = !led_amarelo_ligado; // Alterna o estado do LED
+  intervalo = 500;
+}
+
+// Verifica se o botão foi pressionado
+void verificarBotao() {
+  bool estado_atual_botao = !digitalRead(PINO_BOTAO_PEDESTRE); // LOW significa pressionado
+  if (estado_atual_botao != botao_pressionado) {
+    botao_pressionado = estado_atual_botao;
+    cliente_mqtt.publish(TOPICO_BOTAO_PEDESTRE, botao_pressionado ? "0" : "1"); // Envia o estado do botão
+  }
+}
+
+// Verifica a luminosidade do LDR para ativar o modo noturno
+void verificarLDR() {
+  int leitura_ldr = analogRead(PINO_LDR_NOITE); // Lê o valor do sensor de luz
+  bool modo_noturno = leitura_ldr < LIMITE_MODO_NOTURNO; // Define se está escuro
+
+  if (modo_noturno != modo_noturno_ativo) {
+    intervalo = 0; // Reinicia o intervalo
+    modo_noturno_ativo = modo_noturno;
+    cliente_mqtt.publish(TOPICO_MODO_NOTURNO, modo_noturno_ativo ? "1" : "0"); // Publica o estado do modo noturno
+  }
+
+  if (!modo_noturno && estado_atual == ESTADO_MODO_NOTURNO) {
+    estado_atual = ESTADO_VERMELHO; // Retorna ao estado normal
+  }
+
+  delay(200);
+}
