@@ -1,5 +1,9 @@
 # Documentação do Sistema de Semáforos Inteligentes
 
+## Link do Google Drive com o vídeo de funcionamento e foto da montagem do dispositivo
+
+[Vídeo e foto da montagem](https://drive.google.com/drive/folders/1VjuIugYh5RtSvTQ1AQyVscyxscSRVsIo?usp=sharing)
+
 ## Funcionalidades
 
 1. **Detecção de Veículos e Prioridade no Fluxo:** O sensor LDR detecta a presença de veículos, ajustando o ciclo dos semáforos para otimizar o fluxo de tráfego.  
